@@ -10,6 +10,8 @@ Tran. Networking, vol. 4, no. 3, June 1996.
 from collections import defaultdict as dd
 from collections.abc import Callable
 
+import cython
+
 import simpy
 from ns.packet.packet import Packet
 
@@ -42,43 +44,46 @@ class DRRServer:
     debug: bool
         If True, prints more verbose debug information.
     """
+
     MIN_QUANTUM = 1500
 
-    def __init__(self,
-                 env,
-                 rate,
-                 weights: list,
-                 flow_classes: Callable = lambda p: p.flow_id,
-                 zero_buffer=False,
-                 zero_downstream_buffer=False,
-                 debug: bool = False) -> None:
+    def __init__(
+        self,
+        env,
+        rate: float,
+        weights: list,
+        flow_classes: Callable = lambda p: p.flow_id,
+        zero_buffer=False,
+        zero_downstream_buffer=False,
+        debug: bool = False,
+    ) -> None:
         self.env = env
-        self.rate = rate
-        self.weights = weights
+        self.rate: float = rate
+        self.weights: list = weights
 
-        self.flow_classes = flow_classes
+        self.flow_classes: Callable = flow_classes
 
-        self.deficit = {}
-        self.flow_queue_count = {}
-        self.quantum = {}
+        self.deficit: dict[cython.int, float] = {}
+        self.flow_queue_count: dict[cython.int, float] = {}
+        self.quantum: dict[cython.int, float] = {}
 
         if isinstance(weights, list):
             for queue_id, weight in enumerate(weights):
                 self.deficit[queue_id] = 0.0
                 self.flow_queue_count[queue_id] = 0
-                self.quantum[queue_id] = self.MIN_QUANTUM * weight / min(
-                    weights)
+                self.quantum[queue_id] = self.MIN_QUANTUM * weight / min(weights)
 
         elif isinstance(weights, dict):
-            for (queue_id, value) in weights.items():
+            for queue_id, value in weights.items():
                 self.deficit[queue_id] = 0.0
                 self.flow_queue_count[queue_id] = 0
-                self.quantum[queue_id] = self.MIN_QUANTUM * value / min(
-                    weights.values())
+                self.quantum[queue_id] = (
+                    self.MIN_QUANTUM * value / min(weights.values())
+                )
         else:
-            raise ValueError('Weights must be either a list or a dictionary.')
+            raise ValueError("Weights must be either a list or a dictionary.")
 
-        self.head_of_line = {}
+        self.head_of_line: dict[cython.int, Packet] = {}
         self.active_set = set()
 
         # One FIFO queue for each flow_id or class_id
@@ -89,18 +94,18 @@ class DRRServer:
 
         self.packets_available = simpy.Store(env)
 
-        self.packets_received = 0
+        self.packets_received: cython.int = 0
         self.out = None
 
-        self.upstream_updates = {}
-        self.upstream_stores = {}
+        self.upstream_updates: dict = {}
+        self.upstream_stores: dict = {}
 
-        self.zero_buffer = zero_buffer
-        self.zero_downstream_buffer = zero_downstream_buffer
+        self.zero_buffer: cython.bint = zero_buffer
+        self.zero_downstream_buffer: cython.bint = zero_downstream_buffer
         if self.zero_downstream_buffer:
-            self.downstream_stores = {}
+            self.downstream_stores: dict = {}
 
-        self.debug = debug
+        self.debug: cython.bint = debug
         self.action = env.process(self.run())
 
     def update_stats(self, packet):
@@ -123,13 +128,13 @@ class DRRServer:
         if self.flow_classes(packet) in self.byte_sizes:
             self.byte_sizes[self.flow_classes(packet)] -= packet.size
         else:
-            raise ValueError(
-                "Error: the packet to be sent has never been received.")
+            raise ValueError("Error: the packet to be sent has never been received.")
 
         if self.debug:
             print(
                 f"Sent out packet {packet.packet_id} from flow {packet.flow_id} "
-                f"belonging to class {self.flow_classes(packet)}")
+                f"belonging to class {self.flow_classes(packet)}"
+            )
 
     def update(self, packet):
         """
@@ -152,6 +157,7 @@ class DRRServer:
         """
         return self.current_packet
 
+    @cython.returns(cython.int)
     def byte_size(self, queue_id) -> int:
         """
         Returns the size of the queue for a particular queue_id, in bytes.
@@ -162,6 +168,7 @@ class DRRServer:
 
         return 0
 
+    @cython.returns(cython.int)
     def size(self, queue_id) -> int:
         """
         Returns the size of the queue for a particular queue_id, in the
@@ -178,6 +185,7 @@ class DRRServer:
         """
         return self.byte_sizes.keys()
 
+    @cython.returns(cython.int)
     def total_packets(self) -> int:
         """
         Returns the total number of packets currently in the server.
@@ -196,10 +204,13 @@ class DRRServer:
                         if self.debug:
                             print(
                                 f"Flow queue length: {self.flow_queue_count}, ",
-                                f"deficit counters: {self.deficit}")
+                                f"deficit counters: {self.deficit}",
+                            )
 
-                    while self.deficit[queue_id] > 0 and self.flow_queue_count[
-                            queue_id] > 0:
+                    while (
+                        self.deficit[queue_id] > 0
+                        and self.flow_queue_count[queue_id] > 0
+                    ):
                         if queue_id in self.head_of_line:
                             packet = self.head_of_line[queue_id]
                             del self.head_of_line[queue_id]
@@ -215,8 +226,7 @@ class DRRServer:
 
                         if packet.size <= self.deficit[queue_id]:
                             self.current_packet = packet
-                            yield self.env.timeout(packet.size * 8.0 /
-                                                   self.rate)
+                            yield self.env.timeout(packet.size * 8.0 / self.rate)
 
                             if self.zero_downstream_buffer:
                                 self.update_stats(packet)
@@ -224,7 +234,8 @@ class DRRServer:
                                 self.out.put(
                                     packet,
                                     upstream_update=self.update,
-                                    upstream_store=self.stores[queue_id])
+                                    upstream_store=self.stores[queue_id],
+                                )
                             else:
                                 self.update_stats(packet)
                                 self.update(packet)
@@ -240,7 +251,7 @@ class DRRServer:
             yield self.packets_available.get()
 
     def put(self, packet, upstream_update=None, upstream_store=None):
-        """ Sends a packet to this element. """
+        """Sends a packet to this element."""
         self.packets_received += 1
         self.byte_sizes[self.flow_classes(packet)] += packet.size
 
@@ -250,21 +261,27 @@ class DRRServer:
                 f"belonging to class {self.flow_classes(packet)} "
                 f"packet_id {packet.packet_id}, "
                 f"deficit {self.deficit[self.flow_classes(packet)]}, "
-                f"deficit counters: {self.deficit}")
+                f"deficit counters: {self.deficit}"
+            )
 
         if not self.flow_classes(packet) in self.stores:
             self.stores[self.flow_classes(packet)] = simpy.Store(self.env)
 
             if self.zero_downstream_buffer:
-                self.downstream_stores[self.flow_classes(
-                    packet)] = simpy.Store(self.env)
+                self.downstream_stores[self.flow_classes(packet)] = simpy.Store(
+                    self.env
+                )
 
         if self.total_packets() == 0:
             self.packets_available.put(True)
 
         self.flow_queue_count[self.flow_classes(packet)] += 1
 
-        if self.zero_buffer and upstream_update is not None and upstream_store is not None:
+        if (
+            self.zero_buffer
+            and upstream_update is not None
+            and upstream_store is not None
+        ):
             self.upstream_stores[packet] = upstream_store
             self.upstream_updates[packet] = upstream_update
 
